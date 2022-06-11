@@ -161,21 +161,30 @@ public class ProxiedPlayer implements CommandSender {
                 return;
             }
 
+            CompletableFuture<ServerInfo> serverFuture = new CompletableFuture<>();
+            serverFuture.whenComplete((initServer, err) -> {
+                if(err != null) {
+                    this.getLogger().error("Error when determining initial server", err);
+                    this.disconnect(err.getClass().getName());
+                    return;
+                }
+                if (initServer == null) {
+                    this.disconnect(new TranslationContainer("waterdog.no.initial.server"));
+                    return;
+                }
+                // Event should not change initial server. For we use join handler.
+                InitialServerDeterminationEvent serverEvent = new InitialServerDeterminationEvent(this, initServer);
+                this.proxy.getEventManager().callEvent(serverEvent);
+                this.connect(initServer);
+            });
+
             // Determine forced host first
             ServerInfo initialServer = this.proxy.getForcedHostHandler().resolveForcedHost(this.loginData.getJoinHostname(), this);
             if (initialServer == null) {
-                initialServer = this.proxy.getJoinHandler().determineServer(this);
+                this.proxy.getJoinHandler().determineServer(serverFuture, this);
+            }else{
+                serverFuture.complete(initialServer);
             }
-
-            if (initialServer == null) {
-                this.disconnect(new TranslationContainer("waterdog.no.initial.server"));
-                return;
-            }
-
-            // Event should not change initial server. For we use join handler.
-            InitialServerDeterminationEvent serverEvent = new InitialServerDeterminationEvent(this, initialServer);
-            this.proxy.getEventManager().callEvent(serverEvent);
-            this.connect(initialServer);
         });
     }
 

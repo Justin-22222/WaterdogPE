@@ -19,6 +19,8 @@ import dev.waterdog.waterdogpe.ProxyServer;
 import dev.waterdog.waterdogpe.network.serverinfo.ServerInfo;
 import dev.waterdog.waterdogpe.player.ProxiedPlayer;
 
+import java.util.concurrent.CompletableFuture;
+
 public class VanillaJoinHandler implements IJoinHandler {
 
     private final ProxyServer server;
@@ -28,7 +30,7 @@ public class VanillaJoinHandler implements IJoinHandler {
     }
 
     @Override
-    public ServerInfo determineServer(ProxiedPlayer player) {
-        return this.server.getServerInfo(this.server.getConfiguration().getPriorities().get(0));
+    public void determineServer(CompletableFuture<ServerInfo> future, ProxiedPlayer player) {
+        future.complete(this.server.getServerInfo(this.server.getConfiguration().getPriorities().get(0)));
     }
 }

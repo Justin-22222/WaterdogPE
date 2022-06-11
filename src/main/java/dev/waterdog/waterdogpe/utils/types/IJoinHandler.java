@@ -18,6 +18,8 @@ package dev.waterdog.waterdogpe.utils.types;
 import dev.waterdog.waterdogpe.network.serverinfo.ServerInfo;
 import dev.waterdog.waterdogpe.player.ProxiedPlayer;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Interface that can be implemented and assigned to the server.
  * The JoinHandler is called whenever a player establishes an initial connection.
@@ -31,5 +33,5 @@ public interface IJoinHandler {
      * @param player the player who is connecting to the server
      * @return ServerInfo if a server is found, or null if no server was found. null will lead to the player getting kicked.
      */
-    ServerInfo determineServer(ProxiedPlayer player);
+    void determineServer(CompletableFuture<ServerInfo> future, ProxiedPlayer player);
 }
