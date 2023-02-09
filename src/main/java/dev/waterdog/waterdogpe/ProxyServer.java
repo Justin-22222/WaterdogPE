@@ -22,15 +22,18 @@ import com.nukkitx.network.util.NetworkThreadFactory;
 import com.nukkitx.protocol.bedrock.BedrockClient;
 import com.nukkitx.protocol.bedrock.BedrockServer;
 import dev.waterdog.waterdogpe.command.*;
+import dev.waterdog.waterdogpe.command.utils.CommandUtils;
 import dev.waterdog.waterdogpe.console.TerminalConsole;
 import dev.waterdog.waterdogpe.event.EventManager;
 import dev.waterdog.waterdogpe.event.defaults.DispatchCommandEvent;
 import dev.waterdog.waterdogpe.event.defaults.ProxyStartEvent;
 import dev.waterdog.waterdogpe.logger.MainLogger;
 import dev.waterdog.waterdogpe.network.ProxyListener;
-import dev.waterdog.waterdogpe.network.serverinfo.ServerInfo;
 import dev.waterdog.waterdogpe.network.protocol.ProtocolConstants;
 import dev.waterdog.waterdogpe.network.protocol.ProtocolVersion;
+import dev.waterdog.waterdogpe.network.serverinfo.ServerInfo;
+import dev.waterdog.waterdogpe.network.serverinfo.ServerInfoMap;
+import dev.waterdog.waterdogpe.network.session.CompressionAlgorithm;
 import dev.waterdog.waterdogpe.packs.PackManager;
 import dev.waterdog.waterdogpe.player.PlayerManager;
 import dev.waterdog.waterdogpe.player.ProxiedPlayer;
@@ -38,10 +41,8 @@ import dev.waterdog.waterdogpe.plugin.PluginManager;
 import dev.waterdog.waterdogpe.query.QueryHandler;
 import dev.waterdog.waterdogpe.scheduler.WaterdogScheduler;
 import dev.waterdog.waterdogpe.utils.ConfigurationManager;
-import dev.waterdog.waterdogpe.utils.config.LangConfig;
-import dev.waterdog.waterdogpe.utils.config.ProxyConfig;
-import dev.waterdog.waterdogpe.network.serverinfo.ServerInfoMap;
-import dev.waterdog.waterdogpe.utils.types.ProxyListenerInterface;
+import dev.waterdog.waterdogpe.utils.bstats.Metrics;
+import dev.waterdog.waterdogpe.utils.config.*;
 import dev.waterdog.waterdogpe.utils.types.*;
 import io.netty.channel.EventLoopGroup;
 import net.cubespace.Yamler.Config.InvalidConfigurationException;
@@ -73,6 +74,7 @@ public class ProxyServer {
     private final ServerInfoMap serverInfoMap = new ServerInfoMap();
 
     private BedrockServer bedrockServer;
+    private Set<BedrockServer> additionalPorts = new HashSet<>();
     private QueryHandler queryHandler;
 
     private CommandMap commandMap;
@@ -82,7 +84,8 @@ public class ProxyServer {
     private IJoinHandler joinHandler;
     private IForcedHostHandler forcedHostHandler;
     private IMetricsHandler metricsHandler;
-    private ProxyListenerInterface proxyListener = new ProxyListenerInterface(){};
+    private ProxyListenerInterface proxyListener = new ProxyListenerInterface() {
+    };
 
     private final EventLoopGroup bossEventLoopGroup;
     private final EventLoopGroup workerEventLoopGroup;
@@ -90,6 +93,7 @@ public class ProxyServer {
     private ScheduledFuture<?> tickFuture;
     private boolean shutdown = false;
     private int currentTick = 0;
+    private Metrics metrics;
 
     public ProxyServer(MainLogger logger, String filePath, String pluginPath) throws InvalidConfigurationException {
         instance = this;
@@ -123,6 +127,12 @@ public class ProxyServer {
 
         if (this.getConfiguration().isDebug()) {
             WaterdogPE.version().debug(true);
+        }
+
+        CompressionAlgorithm compression = this.getConfiguration().getCompression();
+        if (compression.getBedrockCompression() == null) {
+            this.logger.error("Bedrock compression supports only ZLIB or Snappy! Currently provided " + compression + ", defaulting to ZLIB!");
+            this.getConfiguration().setCompression(CompressionAlgorithm.ZLIB);
         }
 
         ThreadFactoryBuilder builder = new ThreadFactoryBuilder();
@@ -178,6 +188,11 @@ public class ProxyServer {
             ProtocolConstants.registerCodecs();
         }
 
+        if(this.getConfiguration().isEnableAnonymousStatistics()){
+            Metrics.WaterdogMetrics.startMetrics(this, this.getConfiguration());
+            this.getLogger().info("Enabling anonymous statistics.");
+        }
+
         if (this.getConfiguration().enabledResourcePacks()) {
             this.packManager.loadPacks(this.packsPath);
         }
@@ -186,12 +201,25 @@ public class ProxyServer {
         this.logger.info("Binding to " + bindAddress);
 
         if (this.getConfiguration().isEnabledQuery()) {
-            this.queryHandler = new QueryHandler(this, bindAddress);
+            this.queryHandler = new QueryHandler(this);
         }
 
         this.bedrockServer = new BedrockServer(bindAddress, Runtime.getRuntime().availableProcessors(), this.bossEventLoopGroup, this.workerEventLoopGroup, false);
-        this.bedrockServer.setHandler(new ProxyListener(this));
+        this.bedrockServer.setHandler(new ProxyListener(this, this.queryHandler, bindAddress));
+        this.getLogger().info(new TranslationContainer("waterdog.query.start", bindAddress.toString()).getTranslated());
         this.bedrockServer.bind().join();
+
+        for (Integer port : this.getConfiguration().getAdditionalPorts()) {
+            InetSocketAddress additionalBind = new InetSocketAddress(bindAddress.getAddress(), port);
+
+            BedrockServer newServer = new BedrockServer(additionalBind, Runtime.getRuntime().availableProcessors(), this.bossEventLoopGroup, this.workerEventLoopGroup, false);
+            newServer.setHandler(new ProxyListener(this, this.queryHandler, additionalBind));
+            newServer.bind().join();
+            logger.info("Set up additional port: " + port);
+
+            additionalPorts.add(newServer);
+        }
+
 
         ProxyStartEvent event = new ProxyStartEvent(this);
         this.eventManager.callEvent(event);
@@ -284,7 +312,20 @@ public class ProxyServer {
             return false;
         }
 
-        String[] shiftedArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+        Command command = this.getCommandMap().getCommand(args[0]);
+        if (command == null)  {
+            return false;
+        }
+
+        String[] shiftedArgs;
+        if (command.getSettings().isQuoteAware()) { // Quote aware parsing
+            List<String> arguments = CommandUtils.parseArguments(message);
+            arguments.remove(0);
+            shiftedArgs = arguments.toArray(String[]::new);
+        } else {
+            shiftedArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+        }
+
         DispatchCommandEvent event = new DispatchCommandEvent(sender, args[0], shiftedArgs);
         this.eventManager.callEvent(event);
         return !event.isCancelled() && this.commandMap.handleCommand(sender, args[0], shiftedArgs);
@@ -401,7 +442,14 @@ public class ProxyServer {
      */
     public ServerInfo getForcedHost(String serverHostname) {
         Preconditions.checkNotNull(serverHostname, "ServerHostname can not be null!");
-        String serverName = this.getConfiguration().getForcedHosts().get(serverHostname);
+        String serverName = null;
+
+        for (String forcedHost : this.getConfiguration().getForcedHosts().keySet()) {
+            if (forcedHost.equalsIgnoreCase(serverHostname)) {
+                serverName = this.getConfiguration().getForcedHosts().get(forcedHost);
+                break;
+            }
+        }
         return serverName == null ? null : this.serverInfoMap.get(serverName);
     }
 
