@@ -4,6 +4,7 @@
 name: Maven Build
 
 on: [ push ]
+  workflow_dispatch: 
 
 jobs:
   build:
